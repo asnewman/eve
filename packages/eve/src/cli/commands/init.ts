@@ -22,6 +22,10 @@ import {
 } from "#setup/primitives/index.js";
 import { addAgentToProject } from "#setup/scaffold/create/add-to-project.js";
 import { ensureChannel, scaffoldBaseProject } from "#setup/scaffold/index.js";
+import {
+  DEFAULT_EVE_PACKAGE_CONTRACT,
+  type EvePackageContract,
+} from "#setup/scaffold/create/project.js";
 
 import { initAgentDevHandoff } from "./agent-instructions.js";
 import { tryInitializeGit } from "./init-git.js";
@@ -62,6 +66,7 @@ const defaultDependencies: InitCommandDependencies = {
 
 const CURRENT_DIRECTORY_PROJECT_NAME = ".";
 const ALLOWED_CREATE_IN_PLACE_ENTRIES = new Set([".DS_Store", ".git", ".gitkeep", ".hg"]);
+export const EVE_INIT_PACKAGE_SPEC_ENV = "EVE_INIT_PACKAGE_SPEC";
 
 /** Resolves `target` to an existing directory, or undefined for name mode. */
 async function resolveTargetDirectory(
@@ -105,6 +110,7 @@ async function addToExistingProject(
   targetPath: string,
   options: InitCommandOptions,
   dependencies: InitCommandDependencies,
+  evePackage: EvePackageContract | undefined,
 ): Promise<{ packageManager: PackageManagerKind; nodeEngineOverride?: NodeEngineOverride }> {
   if (options.channelWebNextjs === true) {
     throw new Error(
@@ -114,11 +120,15 @@ async function addToExistingProject(
   }
 
   const manager = await dependencies.detectPackageManager(targetPath);
-  const result = await dependencies.addAgentToProject({
+  const addOptions: Parameters<typeof addAgentToProject>[0] = {
     projectRoot: targetPath,
     model: DEFAULT_AGENT_MODEL_ID,
     packageManager: manager.kind,
-  });
+  };
+  if (evePackage !== undefined) {
+    addOptions.evePackage = evePackage;
+  }
+  const result = await dependencies.addAgentToProject(addOptions);
   return {
     packageManager: manager.kind,
     nodeEngineOverride: result.nodeEngineOverride,
@@ -146,6 +156,7 @@ async function scaffoldProject(
   packageManager: PackageManagerKind,
   options: InitCommandOptions,
   dependencies: InitCommandDependencies,
+  evePackage: EvePackageContract | undefined,
 ): Promise<string> {
   const parentPath = resolve(parentDirectory);
   const createInPlace = projectName === CURRENT_DIRECTORY_PROJECT_NAME;
@@ -159,12 +170,16 @@ async function scaffoldProject(
   const stagingDirectory = await mkdtemp(join(parentPath, ".eve-init-"));
   try {
     const stagedProjectName = createInPlace ? basename(projectPath) : projectName;
-    const stagedProjectPath = await dependencies.scaffoldBaseProject({
+    const scaffoldOptions: Parameters<typeof scaffoldBaseProject>[0] = {
       projectName: stagedProjectName,
       model: DEFAULT_AGENT_MODEL_ID,
       packageManager,
       targetDirectory: stagingDirectory,
-    });
+    };
+    if (evePackage !== undefined) {
+      scaffoldOptions.evePackage = evePackage;
+    }
+    const stagedProjectPath = await dependencies.scaffoldBaseProject(scaffoldOptions);
 
     if (options.channelWebNextjs === true) {
       await dependencies.ensureChannel({
@@ -234,6 +249,7 @@ export async function runInitCommand(
 ): Promise<void> {
   const agentLaunched = await dependencies.isCodingAgentLaunch();
   const rawTarget = target ?? CURRENT_DIRECTORY_PROJECT_NAME;
+  const evePackage = resolveInitEvePackageOverride();
   const currentDirectoryTarget = isCurrentDirectoryTarget(rawTarget);
   const existingDirectory = currentDirectoryTarget
     ? (await pathExists(join(resolve(parentDirectory), "package.json")))
@@ -261,11 +277,17 @@ export async function runInitCommand(
       packageManager,
       options,
       dependencies,
+      evePackage,
     );
     freshScaffold = true;
     logger.log(`${pc.green("✓")} Created an ${EVE_WORDMARK} agent in ${pc.bold(projectPath)}`);
   } else {
-    const addition = await addToExistingProject(existingDirectory, options, dependencies);
+    const addition = await addToExistingProject(
+      existingDirectory,
+      options,
+      dependencies,
+      evePackage,
+    );
     packageManager = addition.packageManager;
     projectPath = existingDirectory;
     freshScaffold = false;
@@ -328,4 +350,16 @@ export async function runInitCommand(
   if (!(await dependencies.spawnPackageManager(packageManager, projectPath, devArguments))) {
     throw new Error(`Development server exited unsuccessfully in "${projectPath}".`);
   }
+}
+
+function resolveInitEvePackageOverride(): EvePackageContract | undefined {
+  const spec = process.env[EVE_INIT_PACKAGE_SPEC_ENV]?.trim();
+  if (spec === undefined || spec.length === 0) {
+    return undefined;
+  }
+
+  return {
+    nodeEngine: DEFAULT_EVE_PACKAGE_CONTRACT.nodeEngine,
+    version: spec,
+  };
 }
